@@ -3,7 +3,7 @@ package protocol
 import (
 	"time"
 
-	"github.com/lxkota/odst/schemas/generated/odst_sbe"
+	"github.com/lxkota95/odst/schemas/generated/odst_sbe"
 )
 
 func encodeNewOrder() []byte {
