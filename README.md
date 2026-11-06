@@ -1,16 +1,29 @@
 # ODST - Order Distribution System Tool
 
-A high-performance equity order management system built with Go and Simple Binary Encoding (SBE) for low-latency trading applications.
+An equity order message format in Go with [Simple Binary Encoding](https://github.com/aeron-io/simple-binary-encoding)
+(SBE), built to learn how binary encodings work.
+
+> **Status: concluded study (November 2026).** The goal was to understand binary encoding: schema
+> design, fixed-size layouts, byte order, and how generated codecs read and write them. The schema,
+> the generated codecs and a tested encode/decode layer are done; the TCP client and server below
+> were never built and stay as ideas (see [What's next](#whats-next)).
 
 ## Overview
 
-ODST (Order Distribution System Tool) is a proof-of-concept trading system that demonstrates:
-- **Simple Binary Encoding (SBE)** for ultra-fast message serialization
-- **FIX Protocol compliance** for industry standardization  
-- **Client-server architecture** with TCP transport
-- **Big-endian byte ordering** for network compatibility
+ODST demonstrates:
+- **Simple Binary Encoding (SBE)**: a schema (`schemas/odst.xml`) compiled into Go codecs
+- **FIX semantics**: field ids are FIX tag numbers (`ClOrdID` = 11, `Side` = 54, ...)
+- **Fixed-size messages**: every field at a known offset, no parsing
+- **Big-endian byte ordering** (network order), chosen in the schema
 
-## Architecture
+Try it:
+
+```bash
+go test -v ./...                                  # wire format, round trip, error cases
+go test -run '^$' -bench . -benchmem ./pkg/protocol  # SBE vs JSON
+```
+
+## Architecture (planned, not built)
 
 ```
 ┌─────────────────┐         ┌─────────────────┐
@@ -27,7 +40,7 @@ ODST (Order Distribution System Tool) is a proof-of-concept trading system that 
 └─────────────────┘         └─────────────────┘
 ```
 
-## Message Flow (Proof of Concept)
+## Message Flow (planned)
 
 1. **Order Submission**: Client → Server (`NewOrderSingle`)
 2. **Order Acknowledgment**: Server → Client (`OrderAck`)
@@ -36,16 +49,16 @@ Future iterations will add execution reports, market data, and order matching.
 
 ## Prerequisites
 
-- **Go 1.19+** (for development)
-- **Java 11+** (for SBE code generation)
-- **SBE Tool** (Simple Binary Encoding compiler)
+- **Go 1.24+**
+- Only to regenerate the codecs after changing the schema: **Java 11+** and the **SBE Tool**
+  (the generated code is committed)
 
-## Quick Start
+## Regenerating the Codecs
 
 ### 1. Clone and Setup
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Lxkota95/odst.git
 cd odst
 mkdir -p schemas/generated
 ```
@@ -76,7 +89,7 @@ java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
     -Dsbe.target.language=golang \
     -Dsbe.output.dir=schemas/generated \
     -jar $SBE_JAR \
-    schemas/odst-messages.xml
+    schemas/odst.xml
 ```
 
 ### 4. Verify Generation
@@ -92,8 +105,8 @@ ls schemas/generated/odst_sbe/
 
 | Message | ID | Description | Size |
 |---------|----|-----------| -----|
-| `NewOrderSingle` | 100 | Order submission | ~195 bytes |
-| `OrderAck` | 101 | Order acknowledgment | ~195 bytes |
+| `NewOrderSingle` | 100 | Order submission | 195-byte body |
+| `OrderAck` | 101 | Order acknowledgment | 213-byte body |
 
 ### Supported Order Types
 
@@ -119,6 +132,8 @@ ls schemas/generated/odst_sbe/
 [4-byte length prefix][8-byte SBE header][Message body]
 ```
 
+The length prefix is for the planned TCP transport; `pkg/protocol` encodes the header and body.
+
 ### SBE Header (8 bytes)
 
 - `blockLength` (2 bytes): Size of message body
@@ -128,10 +143,13 @@ ls schemas/generated/odst_sbe/
 
 ### Example: NewOrderSingle Wire Format
 
+Offsets are within the body, after the 8-byte header; `TestNewOrderSingleWireFormat` checks
+every row.
+
 ```
 Offset  Field           Size    Example Value
 ------  -----           ----    -------------
-0       clOrdID         20      "CLIENT001\0\0\0\0\0\0\0\0\0\0"
+0       clOrdID         20      "CLIENT001\0\0\0\0\0\0\0\0\0\0\0"
 20      account         12      "ACCT123\0\0\0\0\0"
 32      symbol          8       "AAPL\0\0\0\0"
 40      side            1       0x31 ('1' = BUY)
@@ -147,183 +165,92 @@ Offset  Field           Size    Example Value
 
 ## Code Examples
 
+`pkg/protocol` wraps the generated codecs: `Encode` writes the 8-byte header and the body,
+`Decode` reads the header and dispatches on its template id.
+
 ### Encoding a New Order
 
 ```go
-package main
-
-import (
-    "encoding/binary"
-    "time"
-    "your-module/schemas/generated/odst_sbe"
-)
-
-func encodeNewOrder() []byte {
-    // Create buffer
-    buffer := make([]byte, 1024)
-    offset := 0
-    
-    // Encode SBE header
-    header := odst_sbe.MessageHeader{}
-    header.WrapForEncode(buffer, uint64(offset), uint64(len(buffer)))
-    header.SetBlockLength(195) // NewOrderSingle size
-    header.SetTemplateId(100)  // NewOrderSingle template
-    header.SetSchemaId(1)
-    header.SetVersion(0)
-    offset += int(header.Size())
-    
-    // Encode message body
-    order := odst_sbe.NewOrderSingle{}
-    order.WrapForEncode(buffer, uint64(offset), uint64(len(buffer)))
-    order.SetClOrdID("CLIENT001")
-    order.SetAccount("ACCT123")
-    order.SetSymbol("AAPL")
-    order.SetSide(odst_sbe.Side.BUY)
-    order.SetOrderQty(100)
-    order.SetOrdType(odst_sbe.OrdType.LIMIT)
-    order.SetPrice(15000) // $150.00 in ticks
-    order.SetTimeInForce(odst_sbe.TimeInForce.DAY)
-    order.SetTransactTime(uint64(time.Now().UnixNano()))
-    order.SetText("Test limit order")
-    
-    totalSize := int(header.Size()) + int(order.Size())
-    return buffer[:totalSize]
+order := &odst_sbe.NewOrderSingle{
+    Side:         odst_sbe.Side.BUY,
+    OrderQty:     100,
+    OrdType:      odst_sbe.OrdType.LIMIT,
+    Price:        15000, // $150.00 in ticks
+    TimeInForce:  odst_sbe.TimeInForce.DAY,
+    TransactTime: uint64(time.Now().UnixNano()),
 }
+protocol.SetText(order.ClOrdID[:], "CLIENT001") // NUL-padded fixed-size fields
+protocol.SetText(order.Symbol[:], "AAPL")
+
+var buf bytes.Buffer
+err := protocol.Encode(&buf, order) // 8-byte header + 195-byte body
 ```
 
-### Decoding an Order Acknowledgment
+### Decoding a Message
 
 ```go
-func decodeOrderAck(data []byte) {
-    offset := 0
-    
-    // Decode SBE header
-    header := odst_sbe.MessageHeader{}
-    header.WrapForDecode(data, uint64(offset), uint64(len(data)))
-    
-    templateId := header.TemplateId()
-    blockLength := header.BlockLength()
-    offset += int(header.Size())
-    
-    if templateId == 101 { // OrderAck
-        ack := odst_sbe.OrderAck{}
-        ack.WrapForDecode(data, uint64(offset), uint64(len(data)))
-        
-        fmt.Printf("Order %s: %s\n", 
-            ack.ClOrdID(), 
-            ack.AckType())
-        fmt.Printf("Status: %s\n", ack.OrdStatus())
-        fmt.Printf("Text: %s\n", ack.Text())
-    }
+msg, err := protocol.Decode(conn)
+switch m := msg.(type) {
+case *odst_sbe.OrderAck:
+    fmt.Println(protocol.Text(m.OrderID[:]), m.OrdStatus)
+case *odst_sbe.NewOrderSingle:
+    fmt.Println(protocol.Text(m.Symbol[:]), m.OrderQty)
 }
 ```
 
-## Performance Characteristics
+## What I learned
 
-### Message Size Comparison
+Measured with `go test -bench . -benchmem ./pkg/protocol` (Go 1.27, Intel Core Ultra X7 358H),
+for the order in the wire-format table above:
 
-| Format | NewOrderSingle Size |
-|--------|-------------------|
-| JSON | ~400-600 bytes |
-| FIX (text) | ~300-400 bytes |
-| SBE | ~195 bytes |
+| | Size | Encode | Decode |
+|---|---|---|---|
+| SBE (generated Go codec) | 203 bytes (8 + 195) | ~330–420 ns, 5 allocs | ~450–540 ns, 5 allocs |
+| JSON (`encoding/json`) | 186 bytes | ~1.1 µs, 3 allocs | ~1.0 µs, 1 alloc |
 
-### Encoding Performance
-
-| Operation | Latency |
-|-----------|---------|
-| SBE Encoding | ~50-100ns |
-| SBE Decoding | ~30-50ns |
-| JSON Encoding | ~1-2μs |
-| FIX Text Encoding | ~800ns-1μs |
+- **Fixed size isn't automatically small.** The 128-byte `text` field is mostly padding, so this
+  SBE message is *bigger* than the JSON. SBE wins on predictability (every field at a known
+  offset, no parsing), not on bytes; variable-length data belongs in SBE's `<data>` fields.
+- **The codec style matters more than the format.** SBE's headline numbers (tens of nanoseconds)
+  come from flyweight codecs that read and write fields in place in a buffer, as in Java and C++.
+  The Go generator streams field by field through an `io.Writer` and checks enums with
+  reflection, so it's only 2–3× faster than `encoding/json` here.
+- **Byte order is a schema decision.** `byteOrder="bigEndian"` in the schema changes every
+  multi-byte field; the test checks `orderQty`, `price` and `transactTime` byte by byte.
+- **Generated range checks can disagree with the spec.** SBE pads a short `char` array with NUL
+  bytes, but the Go generator's range check only allows printable ASCII, so it rejects every
+  padded string. `pkg/protocol` validates enum fields itself instead.
 
 ## Project Structure
 
 ```
 odst/
 ├── cmd/
-│   ├── odst-server/          # Server application
-│   └── odst-client/          # Client application
+│   ├── odst-server/          # placeholder (planned)
+│   └── odst-client/          # placeholder (planned)
 ├── pkg/
-│   ├── protocol/             # Message handling
-│   ├── network/              # TCP transport
-│   └── validation/           # Order validation
-├── schemas/
-│   ├── odst-messages.xml     # SBE schema definition
-│   └── generated/
-│       └── odst_sbe/         # Generated Go codecs
-├── examples/                 # Usage examples
-├── docs/                     # Documentation
-└── README.md
+│   ├── protocol/             # Encode / Decode over the generated codecs, with tests
+│   └── network/              # placeholder (planned TCP transport)
+└── schemas/
+    ├── odst.xml              # SBE schema definition
+    └── generated/
+        └── odst_sbe/         # Generated Go codecs (do not edit)
 ```
 
-## Development Roadmap
+## What's next
 
-### Phase 1: Proof of Concept ✅
-- [x] SBE schema definition
-- [x] Code generation pipeline
-- [x] Basic message encoding/decoding
-- [ ] TCP client/server implementation
-- [ ] Order validation logic
-- [ ] End-to-end testing
-
-### Phase 2: Core Features
-- [ ] Execution reports with fill details
-- [ ] Order cancellation and replacement
-- [ ] Session management (logon/logout)
-- [ ] Heartbeat mechanism
-- [ ] Error handling and recovery
-
-### Phase 3: Advanced Features
-- [ ] Market data distribution
-- [ ] Order book state management
-- [ ] Multi-symbol support
-- [ ] Risk management controls
-- [ ] Performance monitoring
-
-## Configuration
-
-### Network Settings
-- **Default Port**: 8080
-- **Max Connections**: 1000
-- **Read Timeout**: 5s
-- **Write Timeout**: 5s
-
-### Message Settings
-- **Buffer Size**: 8192 bytes
-- **Max Message Size**: 4096 bytes
-- **Heartbeat Interval**: 30 seconds
-
-## Testing
-
-```bash
-# Run unit tests
-go test ./...
-
-# Run benchmarks
-go test -bench=. ./pkg/protocol/
-
-# Test codec generation
-make generate-codecs
-
-# Integration tests
-make test-integration
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+The study is concluded. If it's picked up again:
+- [ ] TCP client and server, with the 4-byte length prefix framing described above
+- [ ] Order validation and end-to-end tests
+- [ ] Execution reports, cancel/replace, session logon/logout and heartbeats
+- [ ] A flyweight-style codec (read fields in place from a `[]byte`) to compare with the generated one
 
 ## Acknowledgments
 
 - [Simple Binary Encoding](https://github.com/aeron-io/simple-binary-encoding) - High-performance message encoding
 - [FIX Protocol](https://www.fixtrading.org/) - Financial messaging standard
 - Go team for excellent networking and concurrency primitives
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
